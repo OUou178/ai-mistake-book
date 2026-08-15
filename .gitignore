@@ -1,0 +1,18 @@
+# 运行时数据（含 config.json 里的 API 密钥，切勿提交）
+data/
+
+# 构建产物（部署用副本，可重新生成）
+dist/
+
+# 项目本地记忆（非源码）
+.workbuddy/
+
+# 依赖
+node_modules/
+
+# 日志
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db

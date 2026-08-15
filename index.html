@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI 智能错题本</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">📕</span>
+      <div>
+        <h1>AI 智能错题本</h1>
+        <p class="subtitle">自动归类 · 间隔复习 · 个性化推荐</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span id="llmDot" class="llm-dot" title="大模型状态">●</span>
+      <span id="llmModel" class="llm-model" title="当前模型">未配置</span>
+      <span class="version-label" title="版本">v0.3.0</span>
+      <button id="themeBtn" class="btn sm ghost">🌙 夜间</button>
+      <button id="exportBtn" class="btn sm ghost">导出</button>
+      <button id="importBtn" class="btn sm ghost">导入</button>
+      <button id="settingsBtn" class="btn sm ghost" title="设置大模型 / OCR">⚙ 设置</button>
+      <input id="importFile" type="file" accept="application/json" hidden />
+    </div>
+  </header>
+  <div id="netBanner" class="net-banner hidden">⚠ 网络已断开<button class="btn sm" id="netRetry">重试</button></div>
+  <nav class="tabs">
+    <a href="#/notebook" data-route="notebook" class="tab active">错题集</a>
+    <a href="#/qa" data-route="qa" class="tab">AI 答疑</a>
+    <a href="#/add" data-route="add" class="tab">录入</a>
+    <a href="#/review" data-route="review" class="tab">复习</a>
+    <a href="#/plan" data-route="plan" class="tab">复习计划</a>
+    <a href="#/dashboard" data-route="dashboard" class="tab">数据看板</a>
+    <a href="#/help" data-route="help" class="tab">帮助</a>
+  </nav>
+
+  <main>
+    <!-- 错题集主页（双栏） -->
+    <section id="page-notebook" class="page active">
+      <div class="toolbar">
+        <input id="searchInput" class="search" type="search" placeholder="搜索题干 / 答案 / 知识点…" />
+        <select id="filterStage" class="select"><option value="">全部学段</option></select>
+        <select id="filterGrade" class="select"><option value="">全部年级</option></select>
+        <select id="filterSubject" class="select"></select>
+        <select id="filterError" class="select"><option value="">全部错因</option></select>
+        <select id="filterStatus" class="select">
+          <option value="">全部状态</option>
+          <option value="due">待复习</option>
+          <option value="learning">学习中</option>
+          <option value="mastered">已掌握</option>
+        </select>
+        <button id="resetFilters" class="btn sm ghost">重置</button>
+        <a href="#/add" class="btn primary sm">+ 录入</a>
+      </div>
+      <div id="notebookList"></div>
+    </section>
+
+    <!-- AI 答疑页（单栏 + SSE 流式） -->
+    <section id="page-qa" class="page">
+      <div class="qa-bar">
+        <div id="qaHistory" class="qa-history"></div>
+        <button id="newQa" class="btn sm ghost">+ 新会话</button>
+      </div>
+      <div class="chat-area">
+        <div class="head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <h3 style="margin:0;font-weight:900">🤖 AI 学伴</h3>
+          <span id="qaStatus" class="muted" style="font-size:12px;font-weight:700">未连接</span>
+        </div>
+        <div id="chatMsgs" class="chat-msgs"></div>
+        <form id="chatForm" class="chat-input">
+          <input id="chatInput" class="input" placeholder="提问，例如：「三角函数诱导公式怎么记？」「行测资料分析怎么提速？」" />
+          <button type="submit" class="btn primary">发送</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- 录入页（单栏 + OCR） -->
+    <section id="page-add" class="page">
+      <form id="addForm" class="add-form">
+        <h2 style="margin:0 0 16px;font-size:20px;font-weight:900">录入错题</h2>
+        <div class="row">
+          <label>学段
+            <select id="fStage"></select>
+          </label>
+          <label>年级 / 考试
+            <select id="fGrade"></select>
+          </label>
+        </div>
+        <div class="row">
+          <label>学科 / 科目
+            <select id="fSubject" name="subject" required></select>
+          </label>
+          <label>难度
+            <select id="fDifficulty" name="difficulty">
+              <option value="1">★ 简单</option>
+              <option value="2">★★ 较易</option>
+              <option value="3" selected>★★★ 中等</option>
+              <option value="4">★★★★ 较难</option>
+              <option value="5">★★★★★ 困难</option>
+            </select>
+          </label>
+        </div>
+        <label>题干
+          <textarea id="fQuestion" rows="3" placeholder="粘贴或输入题目内容…也可点下方「选择图片」OCR 识别" required></textarea>
+        </label>
+        <div class="img-area">
+          <div class="img-actions">
+            <button type="button" id="uploadImgBtn" class="btn ghost sm">📷 选择图片（OCR）</button>
+            <span class="muted" style="font-size:12px;font-weight:700">支持 JPG / PNG，≤ 10MB；或直接 Ctrl+V 粘贴图片</span>
+          </div>
+          <input id="imgFile" type="file" accept="image/jpeg,image/png" hidden />
+          <div id="imgPreview" class="hidden" style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-top:8px"></div>
+          <div id="uploadError" class="upload-error hidden"></div>
+          <div id="ocrProgress" class="ocr-progress hidden"><div class="ocr-bar"></div><span id="ocrProgressText">OCR 识别中…</span></div>
+        </div>
+        <div class="row">
+          <label>我的错误答案
+            <textarea id="fMyAnswer" rows="2"></textarea>
+          </label>
+          <label>正确答案
+            <textarea id="fCorrect" rows="2"></textarea>
+          </label>
+        </div>
+        <label>错因分析 / 备注
+          <textarea id="fAnalysis" rows="2" placeholder="可补充自己的理解（可选）"></textarea>
+        </label>
+        <label>自评掌握程度
+          <div class="score-buttons" id="fScore">
+            <button type="button" class="score s1" data-v="1">1 · 完全不会</button>
+            <button type="button" class="score s2" data-v="2">2 · 模糊</button>
+            <button type="button" class="score s3" data-v="3">3 · 大致</button>
+            <button type="button" class="score s4" data-v="4">4 · 熟练</button>
+            <button type="button" class="score s5" data-v="5">5 · 精通</button>
+          </div>
+        </label>
+        <div class="ai-box">
+          <div class="ai-head">🤖 智能分析（保存时自动写入）</div>
+          <div id="aiPreview" class="ai-preview muted">填写题干与答案后，点击「智能预分析」可预览自动归类结果。</div>
+          <button type="button" id="aiAnalyzeBtn" class="btn ghost sm">智能预分析</button>
+        </div>
+        <div class="form-actions" style="display:flex;gap:10px">
+          <button type="submit" class="btn primary">保存错题</button>
+          <button type="reset" class="btn ghost">清空</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- 复习页（三阶段） -->
+    <section id="page-review" class="page">
+      <div class="head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="margin:0;font-size:20px;font-weight:900">📚 复习</h2>
+        <span id="reviewSummary" class="muted" style="font-weight:700"></span>
+      </div>
+      <div class="review-phases">
+        <div class="phase due">
+          <h3>⚡ 今日到期 <span id="dueCount">0</span></h3>
+          <div id="dueList" class="card-list" style="grid-template-columns:1fr"></div>
+        </div>
+        <div class="phase learning">
+          <h3>📖 学习中 <span id="learningCount">0</span></h3>
+          <div id="learningList" class="card-list" style="grid-template-columns:1fr"></div>
+        </div>
+        <div class="phase mastered">
+          <h3>🏆 已掌握 <span id="masteredCount">0</span></h3>
+          <div id="masteredList" class="card-list" style="grid-template-columns:1fr"></div>
+        </div>
+      </div>
+
+      <!-- 🪄 一键变体复习（生成 5 道变体题 + 答题 + AI 批改） -->
+      <div class="panel" style="margin-top:18px">
+        <h3>🪄 一键变体复习</h3>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+          <select id="vpStage" class="select"><option value="">选择学段</option></select>
+          <select id="vpSubject" class="select"><option value="">选择学科</option></select>
+          <select id="vpBase" class="select" style="min-width:240px"></select>
+          <input id="vpCount" class="input" type="number" min="1" max="10" value="5" style="max-width:90px" />
+          <button id="vpGenerate" class="btn primary sm">🪄 生成变体题</button>
+        </div>
+        <div id="vpStatus" class="muted" style="font-weight:700;margin-bottom:8px">从错题集挑一道题做模板，生成变体题并现场作答，AI 批改。</div>
+        <div id="vpArea"></div>
+      </div>
+    </section>
+
+    <!-- 复习计划页（按学段/考试筛选，单独出计划） -->
+    <section id="page-plan" class="page">
+      <div class="head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="margin:0;font-size:20px;font-weight:900">🗓️ 复习计划</h2>
+        <span id="planSummary" class="muted" style="font-weight:700"></span>
+      </div>
+      <div class="toolbar" style="margin-bottom:18px">
+        <select id="planStage" class="select"><option value="">选择学段 / 考试</option></select>
+        <select id="planGrade" class="select"><option value="">选择年级 / 考试类别</option></select>
+        <button id="planBtn" class="btn primary sm">生成复习计划</button>
+      </div>
+      <div id="planBody"></div>
+    </section>
+
+    <!-- 数据看板（网格 2 列 + ECharts） -->
+    <section id="page-dashboard" class="page">
+      <div class="head" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="margin:0;font-size:20px;font-weight:900">📊 数据看板</h2>
+        <span id="dashSummary" class="muted" style="font-weight:700"></span>
+      </div>
+      <div class="stat-grid" id="statGrid"></div>
+      <div class="panel-grid">
+        <div class="panel"><h3>学科分布</h3><div id="chartSubject" class="chart"></div></div>
+        <div class="panel"><h3>错误类型分布</h3><div id="chartError" class="chart"></div></div>
+        <div class="panel"><h3>学段 / 考试分布</h3><div id="chartStage" class="chart"></div></div>
+        <div class="panel"><h3>复习进度</h3><div id="chartProgress" class="chart"></div></div>
+        <div class="panel" style="grid-column:1/-1"><h3>最近 14 天错题趋势</h3><div id="chartTrend" class="chart" style="height:240px"></div></div>
+      </div>
+      <div class="panel" style="margin-top:18px">
+        <h3>🎯 知识点掌握度</h3>
+        <div id="kpMastery"></div>
+      </div>
+      <div class="panel" style="margin-top:18px">
+        <h3>🤖 个性化复习建议</h3>
+        <ul id="recommendList" style="margin:0;padding-left:20px;font-weight:600"></ul>
+      </div>
+    </section>
+
+    <!-- 帮助中心（单栏 + 顶部目录条） -->
+    <section id="page-help" class="page">
+      <nav class="help-toc">
+        <a href="#sec-intro">📌 简介</a>
+        <a href="#sec-quickstart">🚀 快速开始</a>
+        <a href="#sec-stages">🎓 学段与考试</a>
+        <a href="#sec-ai">🤖 AI 与大模型</a>
+        <a href="#sec-review">🔁 间隔复习</a>
+        <a href="#sec-vector">🔍 向量库 / 相似题</a>
+        <a href="#sec-deploy">⚙️ 部署与配置</a>
+        <a href="#sec-faq">❓ FAQ</a>
+      </nav>
+      <article class="help-content">
+        <h2 id="sec-intro">📌 简介</h2>
+        <p>AI 智能错题本帮你<strong>自动归类</strong>错题、<strong>智能复习</strong>、<strong>个性化推荐</strong>。纯前端可用，接入后端更完整。</p>
+
+        <h2 id="sec-quickstart">🚀 快速开始</h2>
+        <ol>
+          <li>点击「录入」→ 选学段 / 年级 / 学科 → 填题 → 「智能预分析」→ 保存</li>
+          <li>在「错题集」查看，自动按学科 / 错误类型分组</li>
+          <li>在「复习」完成到期队列的自评</li>
+          <li>在「数据看板」看趋势</li>
+        </ol>
+
+        <h2 id="sec-stages">🎓 学段与考试</h2>
+        <p>支持从小学到大学的完整学段，加上 10 类社会性考试：考研、公务员、教师资格、法律职业资格、注册会计师、执业医师、雅思、托福、英语四六级、计算机等级。</p>
+        <div class="note">社会性考试下，「年级」槽位即考试名称，学科随考试变化（如考研的政治/英语/数学，公务员的行测/申论）。</div>
+
+        <h2 id="sec-ai">🤖 AI 与大模型</h2>
+        <p>点击顶栏 <strong>「⚙ 设置」</strong>，填写 API Key / Base URL / Model 即可启用大模型（配置保存在后端 <code>data/config.json</code>）。保存时会自动校验连通性。</p>
+        <p>也可以在启动后端时设置环境变量启用：</p>
+        <pre><code>LLM_API_KEY=sk-xxx LLM_BASE_URL=https://api.openai.com/v1/chat/completions LLM_MODEL=gpt-4o-mini node server.js</code></pre>
+        <p>未配置时自动回退本地规则引擎，仍然可用。顶栏圆点（绿=已接入 / 红=本地规则）可快速判断当前状态。</p>
+
+        <h3 id="sec-apis">🔌 功能所需的外部 API</h3>
+        <p>本应用的 AI 能力依赖以下两类外部 API，在「⚙ 设置」中填写即可接入（配置存于后端 <code>data/config.json</code>）：</p>
+        <h4>1. 大模型 API（智能分析 / 变体题 / AI 批改 / AI 答疑）</h4>
+        <ul>
+          <li>接口：<code>POST {Base URL}</code>（OpenAI 兼容的 <code>/chat/completions</code>）</li>
+          <li>鉴权：<code>Authorization: Bearer {API Key}</code></li>
+          <li>请求体：<code>{ "model": "...", "messages": [{"role":"user","content":"..."}], "temperature": 0.2 }</code></li>
+          <li>适用厂商：OpenAI / Azure OpenAI / 通义千问 / 智谱 GLM / DeepSeek 等任意兼容端点</li>
+        </ul>
+        <h4>2. OCR API（拍照 / 粘贴图片识别题目）</h4>
+        <ul>
+          <li><b>方案 A · 跟随大模型（OpenAI 兼容视觉）</b>：复用上面的 LLM 配置，把图片作为 <code>image_url</code> 内容块发送，模型返回识别文字。需模型支持视觉（如 gpt-4o、qwen-vl、glm-4v、deepseek-vl）。</li>
+          <li><b>方案 B · 百度智能云 OCR</b>：<code>POST https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic?access_token=TOKEN</code>，需 API Key + Secret Key（后端自动用密钥换取 access_token）。</li>
+        </ul>
+        <div class="note">后端内置本地规则兜底：未配置外部 API 时，分析 / 变体 / 批改 / 答疑仍可用，只是不走真实大模型。</div>
+
+        <h2 id="sec-review">🔁 间隔复习</h2>
+        <p>采用 Leitner 5 盒系统：</p>
+        <ul>
+          <li><code>L1</code>：1 天后复习</li>
+          <li><code>L2</code>：3 天后复习</li>
+          <li><code>L3</code>：7 天后复习</li>
+          <li><code>L4</code>：16 天后复习</li>
+          <li><code>L5</code>：30 天后复习 → <strong>已掌握</strong></li>
+        </ul>
+        <p>「记住了」升级一盒，「还不会」回到 L1。也可以用录入时的 5 色评分按钮预估掌握程度。</p>
+
+        <h2 id="sec-vector">🔍 向量库 / 相似题</h2>
+        <p>后端用中文 bigram TF-IDF + 余弦相似度做向量库。添加错题时相似度 ≥ 0.82 自动标 <code>duplicateOf</code>。详情弹窗会显示相似错题。</p>
+
+        <h2 id="sec-deploy">⚙️ 部署与配置</h2>
+        <pre><code># 前端
+python -m http.server 8000
+# 后端（默认 3000）
+node server.js
+# 启用 OCR
+（OCR_API_KEY=xxx node server.js）</code></pre>
+
+        <h2 id="sec-faq">❓ FAQ</h2>
+        <h3>后端连不上怎么办？</h3>
+        <p>前端会自动回退 localStorage，核心功能仍可用。</p>
+        <h3>数据会丢吗？</h3>
+        <p>localStorage 镜像了一份；也可以用「导出」备份 JSON。</p>
+      </article>
+    </section>
+  </main>
+
+  <div id="settingsModal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" data-close-settings>✕</button>
+      <div id="settingsBody"></div>
+    </div>
+  </div>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <button id="modalClose" class="modal-close">✕</button>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="api.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
