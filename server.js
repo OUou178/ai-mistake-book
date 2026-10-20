@@ -197,7 +197,8 @@ function getLLMConfig() {
   return {
     key: c.apiKey || process.env.LLM_API_KEY || '',
     base: c.baseUrl || process.env.LLM_BASE_URL || 'https://api.openai.com/v1/chat/completions',
-    model: c.model || process.env.LLM_MODEL || 'gpt-4o-mini'
+    model: c.model || process.env.LLM_MODEL || 'gpt-4o-mini',
+    vision: c.vision || process.env.LLM_VISION_MODEL || ''
   };
 }
 function getOCRConfig() {
@@ -210,9 +211,9 @@ function getOCRConfig() {
       secretKey: c.secretKey || process.env.OCR_SECRET_KEY || ''
     };
   }
-  // openai 兼容视觉：复用大模型配置
+  // openai 兼容视觉：复用大模型配置（视觉模型优先）
   const llm = getLLMConfig();
-  return { vendor: 'openai', apiKey: llm.key, baseUrl: llm.base, model: llm.model };
+  return { vendor: 'openai', apiKey: llm.key, base: llm.base, model: llm.vision || llm.model };
 }
 function ocrEnabled() {
   const cfg = getOCRConfig();
@@ -252,7 +253,7 @@ async function llmAnalyze(payload) {
   try {
     const r = await fetch(base, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + process.env.LLM_API_KEY },
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + cfg.key },
       body: JSON.stringify({
         model, temperature: 0.2,
         messages: [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify(payload) }],
@@ -275,7 +276,7 @@ async function llmVariants(payload) {
     const sys = `你是出题助手。基于原题生成 ${payload.count || 5} 道变体题，保持考点、难度相近，结构相似。每题一行 JSON: {"question":"...","hint":"..."}，整体输出 JSON {"items":[...]}`;
     const r = await fetch(base, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + process.env.LLM_API_KEY },
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + cfg.key },
       body: JSON.stringify({ model, temperature: 0.7, messages: [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify(payload) }], response_format: { type: 'json_object' } })
     });
     if (!r.ok) return null;
@@ -295,7 +296,7 @@ async function llmGrade(payload) {
     const sys = '你是 AI 批改助手。判断学生答案是否正确、得分(0-5)、简短评语。输出 JSON: {"score":N,"correct":bool,"comment":"..."}';
     const r = await fetch(base, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + process.env.LLM_API_KEY },
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + cfg.key },
       body: JSON.stringify({ model, temperature: 0.2, messages: [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify(payload) }], response_format: { type: 'json_object' } })
     });
     if (!r.ok) return null;
@@ -352,9 +353,9 @@ async function ocrText(imageDataUrl) {
     if (!cfg.apiKey || !cfg.secretKey) return null;
     return await ocrBaidu(imageDataUrl, cfg);
   }
-  // 默认 openai 兼容视觉：复用大模型配置
-  const llm = getLLMConfig();
-  if (!llm.key) return null;
+  // 默认 openai 兼容视觉：复用大模型配置（getOCRConfig 已优先取视觉模型）
+  const llm = getOCRConfig();
+  if (!llm.apiKey) return null;
   return await ocrVision(imageDataUrl, llm);
 }
 
@@ -380,7 +381,7 @@ function find(id) { return store.items.find((m) => m.id === id); }
 
 /* ---------- 静态资源托管（单端口部署：前端 + 后端同源，任意端口可用） ---------- */
 // 严格白名单：只托管前端必需文件，杜绝源码 / 数据 / 子目录泄露
-const STATIC_ALLOWED = new Set(['index.html', 'app.js', 'api.js', 'styles.css']);
+const STATIC_ALLOWED = new Set(['index.html', 'app.js', 'api.js', 'styles.css', 'config.js']);
 function serveStatic(p, res) {
   let rel = decodeURIComponent(p).replace(/^\/+/, '');
   if (rel === '' || rel === 'index.html') rel = 'index.html';
@@ -415,7 +416,7 @@ const server = http.createServer(async (req, res) => {
       const o = getOCRConfig();
       return send(res, 200, {
         hasKey: !!c.key,
-        llm: { base: c.base, model: c.model },
+        llm: { base: c.base, model: c.model, vision: c.vision },
         ocr: { vendor: o.vendor, hasKey: !!o.apiKey, hasSecret: !!o.secretKey }
       });
     }
@@ -434,7 +435,7 @@ const server = http.createServer(async (req, res) => {
       if (!cand.base) return send(res, 200, { ok: false, error: '请填写 Base URL', saved: false });
       const test = await testLLM(cand);
       if (!test.ok && !test.network) return send(res, 200, { ok: false, error: '校验失败：' + test.error, saved: false });
-      config.llm = { apiKey: cand.key, baseUrl: cand.base, model: cand.model };
+      config.llm = { apiKey: cand.key, baseUrl: cand.base, model: cand.model, vision: (llmIn.vision != null && llmIn.vision !== '') ? llmIn.vision : cur.vision };
       if (b.ocr) {
         config.ocr = config.ocr || {};
         if (b.ocr.vendor != null) config.ocr.vendor = b.ocr.vendor;
@@ -595,13 +596,33 @@ const server = http.createServer(async (req, res) => {
           const cfg = getLLMConfig();
           const base = cfg.base;
           const model = cfg.model;
-          const sys = '你是 AI 学伴，回答学生关于错题和学科的问题，简短、有条理，给出可执行建议。';
+          // 输出格式约束：禁用 LaTeX/Markdown 源码——前端是 textContent 直贴，源码会原样显示给用户
+          // 强制用「自然语言 + HTML 表格 + 直接显示的中文标点」，让前端能直接渲染出漂亮的最终样式
+          const sys = [
+            '你是 AI 学伴，回答学生关于错题和学科的问题，简短、有条理，给出可执行建议。',
+            '',
+            '【输出格式硬性约束 — 必须遵守，违反会让用户看到乱码】',
+            '1. 数学公式：用最朴素的方式写，如「π/2」「sin(x+y)」「(a+b)/c」「x²+y²=1」。',
+            '   禁止使用任何 LaTeX 源码：禁止 $...$、\\frac{}{}、\\sin、\\alpha、\\left \\right 等。',
+            '2. 标题与列表：用纯文字或数字编号(如「一、核心口诀」「(1)(2)(3)」），',
+            '   禁止使用 Markdown 源码：禁止 ### ####、---、**粗体符号**、`代码`。',
+            '3. 需要对比 / 列举 / 步骤时，**直接使用 HTML 表格 <table> 或 <ol><li> 标签**，',
+            '   浏览器会原样渲染成漂亮格式。表格示例：<table><tr><th>情况</th><th>口诀</th></tr><tr><td>奇数</td><td>函数名变</td></tr></table>',
+            '4. 强调可用【】包围关键词（比方括号更显眼）；避免单独一行「---」「===」',
+            '5. 段落之间用空行分隔；不要用任何控制符号 / 转义符 / 反引号。'
+          ].join('\n');
           const r = await fetch(base, {
             method: 'POST',
-            headers: { 'content-type': 'application/json', authorization: 'Bearer ' + process.env.LLM_API_KEY },
+            headers: { 'content-type': 'application/json', authorization: 'Bearer ' + cfg.key },
             body: JSON.stringify({ model, stream: true, messages: [{ role: 'system', content: sys }, { role: 'user', content: '[学科:' + subject + '] ' + q }] })
           });
-          if (!r.ok || !r.body) { write({ error: 'LLM 调用失败' }); return res.end(); }
+          if (!r.ok || !r.body) {
+            // 透传上游状态码 + body 截短，下次再炸不用瞎子摸象
+            let bodyTxt = '';
+            try { bodyTxt = (await r.text()).slice(0, 300); } catch {}
+            write({ error: `LLM 调用失败：HTTP ${r.status} ${r.statusText || ''}${bodyTxt ? ' · ' + bodyTxt : ''}` });
+            return res.end();
+          }
           const reader = r.body.getReader();
           const dec = new TextDecoder();
           let buf = '';

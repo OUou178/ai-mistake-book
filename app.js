@@ -79,6 +79,54 @@ const $$ = (s) => Array.from(document.querySelectorAll(s));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const truncate = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : (s || ''));
+
+// 渲染 AI 答复：把 LaTeX 源码 / Markdown 兜底转成显示用 HTML，表格 / 公式 / 列表都能漂亮显示
+// 模型 system prompt 已约束输出格式，此函数是兜底（即便模型偷懒用了 LaTeX 源码也能美显示）
+function renderRichText(text) {
+  if (!text) return '';
+  // 1) 抽取「保留区」：模型给的 <table>/<ol>/<ul> 原样保留，不被 HTML 转义吃掉
+  const preserved = [];
+  text = text.replace(/<table[\s\S]*?<\/table>/gi, (m) => {
+    preserved.push(m); return `\u0001T${preserved.length - 1}\u0001`;
+  });
+  text = text.replace(/<\/?(ol|ul|li)\b[^>]*>/gi, (m) => {
+    preserved.push(m); return `\u0001L${preserved.length - 1}\u0001`;
+  });
+  // 2) 抽取公式段（KaTeX 处理），先占位
+  const maths = [];
+  text = text.replace(/\$([^$\n]+?)\$/g, (_, tex) => {
+    maths.push(tex); return `\u0001M${maths.length - 1}\u0001`;
+  });
+  // 3) 剩余文本 HTML 转义
+  text = esc(text);
+  // 4) Markdown 兜底
+  text = text.replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/^\s{0,3}#{1,4}\s+(.+)$/gm, '<div class="md-h">$1</div>');
+  text = text.replace(/^\s*---\s*$/gm, '<hr class="md-hr">');
+  // 5) 段落分隔：双换行 → </p><p>，单换行 → <br>
+  text = text.replace(/\n\s*\n/g, '</p><p>');
+  text = text.replace(/\n/g, '<br>');
+  text = '<p>' + text + '</p>';
+  text = text.replace(/<p>\s*<\/p>/g, '');
+  text = text.replace(/<p>(\s*<hr class="md-hr">\s*)<\/p>/g, '$1');
+  // 6) 还回保留的 table / ol / ul 标签（已在最后,不再被外层 <p> 包）
+  text = text.replace(/<p>\s*(\u0001T\d+\u0001)\s*<\/p>/g, '$1');
+  text = text.replace(/<p>(\s*)(\u0001L\d+\u0001)/g, '$2');
+  text = text.replace(/(\u0001L\d+\u0001)\s*<\/p>/g, '$1');
+  text = text.replace(/\u0001T(\d+)\u0001/g, (_, i) => preserved[+i] || '');
+  text = text.replace(/\u0001L(\d+)\u0001/g, (_, i) => preserved[+i] || '');
+  // 7) 公式段 KaTeX 渲染
+  text = text.replace(/\u0001M(\d+)\u0001/g, (_, i) => {
+    const tex = maths[+i] || '';
+    if (window.katex) {
+      try {
+        return window.katex.renderToString(tex, { throwOnError: false, displayMode: false });
+      } catch (e) { /* fall through */ }
+    }
+    return '<code class="md-math-fallback">$' + esc(tex) + '$</code>';
+  });
+  return text;
+}
 const gradesOf = (stage) => (STAGES[stage]?.grades || []);
 const subjectsOf = (stage, grade) => {
   if (stage === '社会性考试') return (STAGES['社会性考试'].examSubjects[grade] || ['其他']).slice();
@@ -183,6 +231,14 @@ function splitQuestions(text) {
   if (cur.trim()) out.push(cur.trim());
   if (out.length === 0 && text.trim()) out.push(text.trim());
   return out;
+}
+
+// 防呆：识别用户是否误把整个录入页面截屏上传（OCR 会读到大量 UI 标签而非题目）
+// 命中 >=2 个已知 UI 标签即判定为「表单截图」，返回命中的前几个标签用于提示，否则返回 null
+function detectFormScreenshot(text) {
+  const markers = ['题干', '我的错误答案', '正确答案', '错因分析', '自评掌握程度', '选择图片', '学科/科目', '难度', 'OCR识别', '移除', '可补充自己的理解', '录入'];
+  const hits = markers.filter((m) => text.includes(m));
+  return hits.length >= 2 ? hits.slice(0, 3).join('、') : null;
 }
 
 /* ---------- 一键变体复习 ---------- */
@@ -477,32 +533,33 @@ async function sendChat(text) {
   const meta = aiEl.querySelector('.meta');
   let acc = '';
 
-  // 用 fetch 读取 SSE（EventSource 不支持自定义 header，便于扩展）
+  // 思考阶段占位（thinking 模型前 N 段 reasoning_content 不输出给用户，这里用动画代替空白）
+  let thinkTimer = null;
+  const startThinking = () => {
+    let dots = 0;
+    thinkTimer = setInterval(() => {
+      if (acc) { clearInterval(thinkTimer); thinkTimer = null; return; }
+      dots = (dots + 1) % 4;
+      bubble.textContent = '💭 模型思考中' + '…'.repeat(dots);
+      msgs.scrollTop = msgs.scrollHeight;
+    }, 500);
+  };
+  startThinking();
+
+  // 用 fetch 读取 SSE（后端优先，离线走浏览器直连厂商接口）
   try {
-    const url = API_BASE + '/api/qa/stream?q=' + encodeURIComponent(text);
-    const r = await fetch(url);
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const reader = r.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n'); buf = lines.pop();
-      for (const ln of lines) {
-        const t = ln.trim();
-        if (!t.startsWith('data:')) continue;
-        try {
-          const j = JSON.parse(t.slice(5).trim());
-          if (j.delta) { acc += j.delta; bubble.textContent = acc; msgs.scrollTop = msgs.scrollHeight; }
-          if (j.error) { acc = j.error; bubble.textContent = acc; }
-        } catch {}
-      }
-    }
+    acc = await API.chatStream(text, (d) => {
+      if (thinkTimer) { clearInterval(thinkTimer); thinkTimer = null; }
+      acc += d;
+      bubble.textContent = acc; // streaming 阶段保留原文（避免公式渲染抖动）
+      msgs.scrollTop = msgs.scrollHeight;
+    });
+    // 流式结束：一次性富文本渲染（LaTeX / Markdown → HTML；表格 / 公式 / 列表漂亮显示）
+    bubble.innerHTML = renderRichText(acc);
   } catch (e) {
-    acc = '（连接后端失败）请确认 server.js 已启动：' + e.message;
-    bubble.textContent = acc;
+    if (thinkTimer) { clearInterval(thinkTimer); thinkTimer = null; }
+    acc = '（AI 调用失败）请确认：① 设置里已填 API Key / Base URL；② 厂商接口需允许浏览器跨域(CORS)，否则请在本机运行后端 server.js。详情：' + e.message;
+    bubble.innerHTML = renderRichText(acc);
   }
   aiEl.classList.remove('streaming');
   meta.textContent = 'AI · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -511,7 +568,6 @@ async function sendChat(text) {
   cur.messages.push({ role: 'ai', text: acc, time: Date.now() });
   saveQa();
 }
-const API_BASE = 'http://127.0.0.1:3000';
 
 // —— 渲染：数据看板（ECharts） ——
 function renderDashboard() {
@@ -786,7 +842,7 @@ function openSettings() {
   const body = $('#settingsBody');
   body.innerHTML = `
     <h2 style="margin:0 0 4px;font-weight:900">⚙ 设置</h2>
-    <p class="muted" style="font-weight:700;margin:0 0 14px">配置大模型后，AI 答疑 / 智能分析 / 变体题 / 批改将使用真实模型。</p>
+    <p class="muted" style="font-weight:700;margin:0 0 14px">配置大模型后，AI 答疑 / 智能分析 / 变体题 / 批改将使用真实模型。无后端（CloudStudio / GitHub Pages）时保存为「浏览器直连模式」，由浏览器直接调用厂商接口（需厂商允许 CORS）。</p>
     <form id="settingsForm" class="settings-form">
       <div class="sec-title">🤖 大模型（LLM）</div>
       <div class="field">
@@ -801,6 +857,15 @@ function openSettings() {
       <div class="field">
         <label>Model Name</label>
         <input id="cfgModel" class="input" type="text" placeholder="gpt-4o-mini" />
+      </div>
+      <div class="field">
+        <label>视觉模型（OCR 图片识别，选填）</label>
+        <input id="cfgVision" class="input" type="text" placeholder="qwen-vl-plus（留空则 OCR 复用上方 Model）" />
+        <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+          <button type="button" id="probeModelsBtn" class="btn small">🔍 探测可用模型</button>
+          <span id="probeModelsOut" class="hint"></span>
+        </div>
+        <span class="hint">识别题目图片时用支持视觉的模型；聊天 / 分析 / 批改仍用上方 Model。例：qwen-vl-plus、qwen-vl-max、gpt-4o、glm-4v。</span>
       </div>
       <div class="sec-title">🔍 OCR（拍照识别，选填）</div>
       <div class="field">
@@ -837,10 +902,11 @@ function openSettings() {
   };
   $('#cfgOcrVendor').addEventListener('change', syncOcrVendor);
   // 预填已有配置（不含 key）
-  API.config().then((c) => {
+  API.config().then(async (c) => {
     if (c && c.llm) {
       if (c.llm.base) $('#cfgBase').value = c.llm.base;
       if (c.llm.model) $('#cfgModel').value = c.llm.model;
+      if (c.llm.vision) $('#cfgVision').value = c.llm.vision;
     }
     if (c && c.ocr && c.ocr.vendor) $('#cfgOcrVendor').value = c.ocr.vendor;
     syncOcrVendor();
@@ -851,6 +917,24 @@ function openSettings() {
     setLlmDot(c && c.hasKey, c && c.llm && c.llm.model);
     const msg = $('#cfgMsg');
     if (msg) { msg.textContent = c && c.hasKey ? '✓ 当前已配置大模型（' + (c.llm?.model || '') + '）' : '尚未配置大模型，AI 功能将使用本地规则。'; msg.className = 'modal-msg ' + (c && c.hasKey ? 'ok' : 'err'); }
+
+    // —— 本地后端在线：OCR 实际由后端（百度）托管，纠正设置页展示，避免误导 ——
+    let backendOnline = false;
+    try { backendOnline = !!(await API.check()); } catch {}
+    if (backendOnline) {
+      const vSel = $('#cfgOcrVendor');
+      if (vSel) { vSel.value = 'baidu'; syncOcrVendor(); }
+      const baiduFields = $('#ocrBaiduFields');
+      if (baiduFields) baiduFields.classList.add('hidden'); // Key 在后端，无需前端填
+      const vis = $('#cfgVision');
+      if (vis) { vis.value = ''; vis.disabled = true; vis.placeholder = '本地后端 OCR 走百度，此字段不用填'; }
+      const probe = $('#probeModelsBtn');
+      if (probe) { probe.disabled = true; probe.title = '本地后端已托管模型，无需探测'; }
+      const po = $('#probeModelsOut');
+      if (po) { po.textContent = '✓ 后端已托管（OCR=百度，聊天=' + (c && c.llm && c.llm.model || 'qwen3.7-flash') + '），直接去「➕ 录入」拍照/粘贴题目即可识别'; po.style.color = '#1a7f37'; }
+      const openaiNote = $('#ocrOpenaiNote');
+      if (openaiNote) openaiNote.innerHTML = '<span class="hint">✓ OCR 由本地后端（百度智能云）提供，已就绪——直接去「➕ 录入」拍照/粘贴题目图片即可识别。</span>';
+    }
   }).catch(() => {});
 
   const form = $('#settingsForm');
@@ -862,7 +946,8 @@ function openSettings() {
       llm: {
         apiKey: $('#cfgKey').value.trim(),
         baseUrl: $('#cfgBase').value.trim(),
-        model: $('#cfgModel').value.trim()
+        model: $('#cfgModel').value.trim(),
+        vision: $('#cfgVision').value.trim()
       },
       ocr: {
         vendor: $('#cfgOcrVendor').value,
@@ -872,20 +957,45 @@ function openSettings() {
     };
     const res = await API.saveConfig(payload);
     if (res && res.ok) {
-      if (res.savedWithWarning) {
+      if (res.localOnly) {
+        msg.textContent = '✓ 已保存为浏览器直连模式（' + (res.model || payload.llm.model || '') + '）· 联网即生效';
+        msg.className = 'modal-msg ok';
+      } else if (res.savedWithWarning) {
         msg.textContent = '⚠ ' + (res.warning || '已保存，但网络校验未通过');
         msg.className = 'modal-msg err';
       } else {
-        msg.textContent = '✓ 保存成功，大模型已启用（' + (res.llm?.model || '') + '）';
+        msg.textContent = '✓ 保存成功，大模型已启用（' + (res.llm?.model || res.model || '') + '）';
         msg.className = 'modal-msg ok';
       }
-      setLlmDot(true, res.llm?.model || payload.llm.model);
+      setLlmDot(true, res.model || payload.llm.model);
       updateNetBanner();
-      setTimeout(() => $('#settingsModal').classList.add('hidden'), 1200);
+      setTimeout(() => $('#settingsModal').classList.add('hidden'), 1400);
     } else {
       msg.textContent = '✗ ' + ((res && res.error) || '保存失败');
       msg.className = 'modal-msg err';
     }
+  });
+
+  // 探测可用模型：列出当前 Base URL 下实际可用的模型名，帮用户找到视觉模型
+  const probeBtn = $('#probeModelsBtn');
+  const probeOut = $('#probeModelsOut');
+  if (probeBtn) probeBtn.addEventListener('click', async () => {
+    // 本地后端在线时模型由后端托管，探测无意义（前端也无 Key），直接说明
+    let backendOnline = false;
+    try { backendOnline = !!(await API.check()); } catch {}
+    if (backendOnline) { probeOut.textContent = '本地后端已托管模型（聊天 + 百度 OCR），无需探测可用模型——直接去「➕ 录入」拍照/粘贴题目即可识别。'; probeOut.style.color = '#1a7f37'; return; }
+    probeBtn.disabled = true;
+    probeOut.textContent = '探测中…';
+    const r = API.listModels ? await API.listModels() : { error: 'API 不支持 listModels' };
+    probeBtn.disabled = false;
+    if (r.error) { probeOut.textContent = '探测失败：' + r.error; probeOut.style.color = '#ff5a5f'; return; }
+    const models = r.models || [];
+    if (!models.length) { probeOut.textContent = '未返回模型列表（该端点可能不支持 /models）'; probeOut.style.color = '#ff5a5f'; return; }
+    const vl = models.filter((m) => /vl|vision/i.test(m));
+    probeOut.style.color = '#1a7f37';
+    probeOut.innerHTML = '共 ' + models.length + ' 个：' + models.map((m) => '<code>' + esc(m) + '</code>').join('、') +
+      (vl.length ? '<br>👁 视觉模型建议填：<b>' + vl.join(' / ') + '</b>' : '<br>⚠ 没发现视觉类模型（含 vl/vision），工作空间可能未部署视觉模型，OCR 暂不可用。');
+    if (vl.length && !$('#cfgVision').value.trim()) $('#cfgVision').value = vl[0];
   });
 }
 
@@ -1068,6 +1178,13 @@ async function runOcr() {
   setOcrProgress(false);
   if (ob) { ob.disabled = false; ob.textContent = '🔍 OCR 识别'; }
   if (res && res.text) {
+    // 防呆：若 OCR 结果里混入了录入表单的 UI 文案（说明用户截到了整个页面而非题目），拦截并提示
+    const formHit = detectFormScreenshot(res.text);
+    if (formHit) {
+      showUploadError('⚠ 这张图里检测到了录入表单的界面文字（如「' + formHit + '」），说明你很可能截到了整个录入页面，而不是题目本身。\n请只截/粘贴题目原图：①用 Win+Shift+S 选区截题目；②或复制题目图片后 Ctrl+V 直接粘到本页「题干」框。再点 OCR 即可。', false);
+      setOcrProgress(false);
+      return;
+    }
     // 拆分多题（OCR 一次识别可能包含 N 道题）
     const qs = splitQuestions(res.text);
     if (qs.length >= 2) {
@@ -1353,11 +1470,13 @@ function initTheme() {
 
 // —— 网络断开横幅 ——
 function updateNetBanner() {
-  if (!navigator.onLine) { $('#netBanner').classList.remove('hidden'); return; }
-  API.status().then((on) => {
-    const b = $('#netBanner');
-    if (on) { b.classList.add('hidden'); }
-    else { b.classList.remove('hidden'); }
+  const b = $('#netBanner');
+  if (!navigator.onLine) { b.classList.remove('hidden'); return; }
+  // 本地直连 / 代理模式：有本地 LLM 配置即可用，不显示误导横幅
+  API.config().then((c) => {
+    if (c && c.hasKey) { b.classList.add('hidden'); return; }
+    // 无本地配置 → 检查后端（node server.js / 同源代理）
+    API.status().then((on) => { (on ? b.classList.add : b.classList.remove)('hidden'); });
   });
 }
 
@@ -1474,7 +1593,7 @@ async function init() {
   refresh();
   updateNetBanner();
   API.config().then((c) => setLlmDot(c && c.hasKey, c && c.llm && c.llm.model)).catch(() => setLlmDot(false));
-  API.status().then((on) => toast(on ? '已连接后端服务 (3000)' : '后端未连接，使用本地存储兜底'));
+  API.status().then((on) => toast(on ? '已连接后端服务' : '后端未连接 · 浏览器直连模式可用（设置里填 Key 即启用 AI）'));
   if (!location.hash) location.hash = '#/notebook'; else navigate();
 }
 document.addEventListener('DOMContentLoaded', init);

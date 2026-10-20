@@ -9,6 +9,9 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js" defer></script>
+  <!-- KaTeX：渲染模型返回的 $...$ 数学公式（如果模型偷懒用了 LaTeX 源码也能漂亮渲染） -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -276,6 +279,18 @@
         </ul>
         <div class="note">后端内置本地规则兜底：未配置外部 API 时，分析 / 变体 / 批改 / 答疑仍可用，只是不走真实大模型。</div>
 
+        <h3 id="sec-direct">🌐 浏览器直连模式（无后端也能用 AI）</h3>
+        <p>当应用以纯静态方式部署（CloudStudio、GitHub Pages 等，没有 Node 后端）时，「⚙ 设置」里保存的 LLM 配置会写入浏览器 <code>localStorage</code>，AI 功能由<strong>浏览器直接</strong>调用厂商接口，无需后端：</p>
+        <ul>
+          <li>智能分析 / 变体题 / AI 批改：浏览器直连 <code>/chat/completions</code> 并解析 JSON。</li>
+          <li>AI 答疑：浏览器直连并逐字流式输出。</li>
+          <li>OCR：仅「跟随大模型（视觉）」厂商可直连；百度 OCR 需服务端签名，静态部署下不可用（请运行后端）。</li>
+        </ul>
+        <div class="note">提示：配置保存后即使没有后端也能生效（顶栏显示绿点 + 模型名即代表已接入）。</div>
+        <div class="note warn">CORS 限制：部分厂商（如 OpenAI 官方接口）默认<strong>不允许浏览器跨域</strong>调用，直连会失败。若遇 CORS 错误，请：① 改用允许 CORS 的兼容端点或代理；或 ② 在本机运行 <code>node server.js</code> 由后端转发请求。</div>
+        <div class="note">想让链接「打开即用、无需手动设置」？在部署目录放一个 <code>config.js</code>（设置 <code>window.__APP_CONFIG__</code> 填入 Base URL/Model），应用启动时会自动读取并启用。模板见 <code>config.example.js</code>。</div>
+        <div class="note warn">🔐 密钥安全：纯静态部署（GitHub Pages / CloudStudio）若把 API Key 写进 <code>config.js</code>，<strong>公开站点会泄露密钥</strong>。推荐做法——用 <strong>Serverless 代理</strong>（仓库里的 <code>api/llm.js</code> 适用于 Vercel，<code>netlify/functions/llm.js</code> 适用于 Netlify）：密钥只放在函数环境变量，前端 <code>config.js</code> 只填函数地址、Key 留空，由函数注入密钥转发。这样前端零密钥、链接打开即用。</div>
+
         <h2 id="sec-review">🔁 间隔复习</h2>
         <p>采用 Leitner 5 盒系统：</p>
         <ul>
@@ -323,6 +338,7 @@ node server.js
 
   <div id="toast" class="toast hidden"></div>
 
+  <script src="config.js"></script>
   <script src="api.js"></script>
   <script src="app.js"></script>
 </body>

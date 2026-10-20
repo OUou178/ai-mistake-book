@@ -373,6 +373,7 @@ main { padding: 24px; max-width: 1200px; margin: 0 auto; }
 .help-content h3 { margin-top: 18px; font-weight: 800; }
 .help-content code { background: #f4ecd0; padding: 2px 6px; border: 2px solid var(--line); font-family: 'JetBrains Mono','Consolas',monospace; font-size: 12px; }
 .help-content .note { background: var(--blue); border: var(--border-w) solid var(--line); padding: 12px; box-shadow: var(--shadow-sm); margin: 12px 0; }
+.help-content .note.warn { background: var(--yellow); }
 
 /* —— 一键变体复习 —— */
 .vp-question { border: var(--border-w) solid var(--line); box-shadow: var(--shadow-sm); padding: 14px; margin-bottom: 12px; background: var(--surface); }
@@ -412,6 +413,54 @@ main { padding: 24px; max-width: 1200px; margin: 0 auto; }
 .diff { color: var(--primary); letter-spacing: 2px; font-weight: 900; }
 .hidden { display: none !important; }
 hr { border: none; border-top: var(--border-w) solid var(--line); margin: 18px 0; }
+
+/* —— AI 答复富文本渲染（renderRichText 兜底输出）—— */
+.msg.ai .bubble > p { margin: 0 0 8px; }
+.msg.ai .bubble > p:last-child { margin-bottom: 0; }
+.msg.ai .bubble .md-h {
+  display: block;
+  font-weight: 800;
+  font-size: 15px;
+  margin: 14px 0 8px;
+  padding-left: 10px;
+  border-left: 4px solid var(--primary);
+  color: var(--ink);
+}
+.msg.ai .bubble .md-hr {
+  border: none;
+  border-top: var(--border-w) dashed var(--line);
+  margin: 14px 0;
+}
+.msg.ai .bubble table {
+  border-collapse: collapse;
+  margin: 8px 0 12px;
+  width: 100%;
+  max-width: 640px;
+  background: #fff;
+}
+.msg.ai .bubble th, .msg.ai .bubble td {
+  border: 2px solid var(--line);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  font-size: 13.5px;
+}
+.msg.ai .bubble th {
+  background: var(--yellow);
+  font-weight: 800;
+  color: var(--ink);
+}
+.msg.ai .bubble tr:nth-child(even) td { background: #fff7d6; }
+.msg.ai .bubble ul, .msg.ai .bubble ol { margin: 6px 0 10px 18px; padding-left: 10px; }
+.msg.ai .bubble li { margin: 3px 0; line-height: 1.6; }
+.msg.ai .bubble code.md-math-fallback {
+  background: #fff1b8;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.msg.ai .bubble .katex { font-size: 1.04em; }
 
 @media (max-width: 900px) {
   .two-col, .two-col.equal { grid-template-columns: 1fr; }
